@@ -53,6 +53,7 @@ from openprocurement.tender.core.utils import (
     has_unanswered_complaints,
     calculate_complaint_business_date,
     calculate_clarifications_business_date,
+    extend_next_check_by_complaint_period_ends,
 )
 from openprocurement.tender.core.constants import CPV_ITEMS_CLASS_FROM
 from openprocurement.tender.openua.models import Tender as OpenUATender
@@ -608,7 +609,7 @@ class Tender(BaseTender):
     edit_accreditations = (ACCR_4,)
 
     special_fields = ["fundingKind", "yearlyPaymentsPercentageRange"]
-    procuring_entity_kinds = ["general", "special", "defense", "central"]
+    procuring_entity_kinds = ["authority", "central", "defense", "general", "social", "special"]
 
     block_tender_complaint_status = OpenUATender.block_tender_complaint_status
     block_complaint_status = OpenUATender.block_complaint_status
@@ -654,10 +655,13 @@ class Tender(BaseTender):
         acl.extend(
             [
                 (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_complaint"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_contract"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "upload_contract_documents"),
             ]
         )
 
         self._acl_cancellation_complaint(acl)
+
         return acl
 
     @serializable(serialized_name="enquiryPeriod", type=ModelType(EnquiryPeriod))
@@ -735,7 +739,9 @@ class Tender(BaseTender):
             and not any([i.status in self.block_complaint_status for a in self.awards for i in a.complaints])
         ):
             standStillEnds = [
-                a.complaintPeriod.endDate.astimezone(TZ) for a in self.awards if a.complaintPeriod.endDate
+                a.complaintPeriod.endDate.astimezone(TZ)
+                for a in self.awards
+                if a.complaintPeriod and a.complaintPeriod.endDate
             ]
             last_award_status = self.awards[-1].status if self.awards else ""
             if standStillEnds and last_award_status == "unsuccessful":
@@ -756,7 +762,9 @@ class Tender(BaseTender):
                     [i.status in self.block_complaint_status for a in lot_awards for i in a.complaints]
                 )
                 standStillEnds = [
-                    a.complaintPeriod.endDate.astimezone(TZ) for a in lot_awards if a.complaintPeriod.endDate
+                    a.complaintPeriod.endDate.astimezone(TZ)
+                    for a in lot_awards
+                    if a.complaintPeriod and a.complaintPeriod.endDate
                 ]
                 last_award_status = lot_awards[-1].status if lot_awards else ""
                 if (
@@ -770,6 +778,9 @@ class Tender(BaseTender):
             for award in self.awards:
                 if award.status == "active" and not any([i.awardID == award.id for i in self.contracts]):
                     checks.append(award.date)
+
+        extend_next_check_by_complaint_period_ends(self, checks)
+
         return min(checks).isoformat() if checks else None
 
     @serializable

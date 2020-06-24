@@ -1,4 +1,5 @@
 from openprocurement.api.constants import RELEASE_2020_04_19
+from openprocurement.api.auth import extract_access_token
 from openprocurement.api.validation import (
     validate_data, validate_json_data, OPERATIONS, validate_accreditation_level,
     validate_accreditation_level_mode,
@@ -7,9 +8,11 @@ from openprocurement.api.validation import (
 from openprocurement.api.utils import (
     apply_data_patch, error_handler, get_now, raise_operation_error,
     update_logging_context,
+    upload_objects_documents,
 )
 from openprocurement.tender.core.utils import calculate_tender_business_date
 from openprocurement.tender.core.validation import validate_tender_period_extension, validate_patch_tender_data_draft
+from openprocurement.tender.openua.constants import POST_SUBMIT_TIME
 
 
 def validate_patch_tender_ua_data(request):
@@ -62,22 +65,22 @@ def validate_update_bid_to_active_status(request):
 
 # bid documents
 def validate_download_bid_document(request):
+
     if request.params.get("download"):
         document = request.validated["document"]
-        authenticated_role = request.authenticated_role
-        if document.confidentiality == "buyerOnly" and authenticated_role not in ("bid_owner", "tender_owner"):
+        if document.view_role() != "view":
             raise_operation_error(request, "Document download forbidden.")
 
 
 def validate_bid_document_operation_in_award_status(request):
     if request.validated["tender_status"] in ("active.qualification", "active.awarded") and not any(
-        award.status in ("pending", "active")
+        award.status == "active"
         for award in request.validated["tender"].awards
         if award.bid_id == request.validated["bid_id"]
     ):
         raise_operation_error(
             request,
-            "Can't {} document because award of bid is not in pending or active state".format(
+            "Can't {} document because award of bid is not active".format(
                 OPERATIONS.get(request.method)
             ),
         )
@@ -190,27 +193,78 @@ def validate_complaint_post_data(request):
     update_logging_context(request, {"post_id": "__new__"})
     validate_post_accreditation_level(request)
     model = type(request.tender).complaints.model_class.posts.model_class
-    return validate_data(request, model)
+    post = validate_data(request, model)
+    upload_objects_documents(
+        request, request.validated["post"],
+        route_kwargs={"post_id": request.validated["post"].id}
+    )
+    return post
 
 
 def validate_award_complaint_post_data(request):
     update_logging_context(request, {"post_id": "__new__"})
     validate_post_accreditation_level(request)
     model = type(request.tender).awards.model_class.complaints.model_class.posts.model_class
-    return validate_data(request, model)
+    post = validate_data(request, model)
+    upload_objects_documents(
+        request, request.validated["post"],
+        route_kwargs={"post_id": request.validated["post"].id}
+    )
+    return post
+
+
+def validate_cancellation_complaint_post_data(request):
+    update_logging_context(request, {"post_id": "__new__"})
+    validate_post_accreditation_level(request)
+    model = type(request.tender).cancellations.model_class.complaints.model_class.posts.model_class
+    post = validate_data(request, model)
+    upload_objects_documents(
+        request, request.validated["post"],
+        route_kwargs={"post_id": request.validated["post"].id}
+    )
+    return post
 
 
 def validate_qualification_complaint_post_data(request):
     update_logging_context(request, {"post_id": "__new__"})
     validate_post_accreditation_level(request)
     model = type(request.tender).qualifications.model_class.complaints.model_class.posts.model_class
-    return validate_data(request, model)
+    post = validate_data(request, model)
+    upload_objects_documents(
+        request, request.validated["post"],
+        route_kwargs={"post_id": request.validated["post"].id}
+    )
+    return post
 
 
-def validate_complaint_post_add_not_in_allowed_complaint_status(request):
-    complaint = request.context
+def validate_complaint_post_complaint_status(request):
+    complaint = request.validated["complaint"]
     if complaint.status not in ["pending", "accepted"]:
-        raise_operation_error(request, "Can't add post in current ({}) complaint status".format(complaint.status))
+        raise_operation_error(
+            request, "Can't submit or edit post in current ({}) complaint status".format(
+                complaint.status
+            )
+        )
+
+
+def validate_complaint_post_review_date(request):
+    complaint = request.validated["complaint"]
+    if complaint.status == "accepted":
+        tender = request.validated["tender"]
+        post_end_date = calculate_tender_business_date(complaint.reviewDate, -POST_SUBMIT_TIME, tender, True)
+        if get_now() > post_end_date:
+            raise_operation_error(
+                request, "Can submit or edit post not later than {0.days} working days before reviewDate".format(
+                    POST_SUBMIT_TIME
+                )
+            )
+
+
+def validate_complaint_post_document_upload_by_author(request):
+    if request.authenticated_role != request.context.author:
+        request.errors.add("url", "role", "Can add document only by post author")
+        request.errors.status = 403
+        raise error_handler(request.errors)
 
 
 def validate_complaint_post(request):

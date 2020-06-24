@@ -20,7 +20,7 @@ from openprocurement.tender.core.models import (
     TenderAuctionPeriod,
     PeriodEndRequired,
     Tender as BaseTender,
-    BaseCancellation,
+    Cancellation as BaseCancellation,
     validate_features_uniq,
 )
 
@@ -201,7 +201,7 @@ class CFASelectionUATender(BaseTender):
     procurementMethod = StringType(choices=["open", "selective", "limited"], default="selective")
     procurementMethodType = StringType(default="closeFrameworkAgreementSelectionUA")
     unsuccessfulReason = ListType(StringType, serialize_when_none=False)
-    procuring_entity_kinds = ["general", "special", "defense", "central", "other"]
+    procuring_entity_kinds = ["authority", "central", "defense", "general", "other", "social", "special"]
 
     def get_role(self):
         root = self.__parent__
@@ -225,6 +225,8 @@ class CFASelectionUATender(BaseTender):
         acl.extend(
             [
                 (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_complaint"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_contract"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "upload_contract_documents"),
                 (Allow, "g:agreement_selection", "edit_agreement_selection"),
                 (Allow, "g:agreement_selection", "edit_tender"),
                 (Allow, "g:brokers", "create_cancellation_complaint")

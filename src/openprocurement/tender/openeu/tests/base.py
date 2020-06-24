@@ -24,6 +24,7 @@ test_bids = [
                 "name_en": u"State administration",
                 "identifier": {
                     "legalName_en": u"dus.gov.ua",
+                    "legalName": u"Державне управління справами",
                     "scheme": u"UA-EDR",
                     "id": u"00037256",
                     "uri": u"http://www.dus.gov.ua/",
@@ -54,6 +55,7 @@ test_bids = [
                 "name_en": u"State administration",
                 "identifier": {
                     "legalName_en": u"dus.gov.ua",
+                    "legalName": u"Державне управління справами",
                     "scheme": u"UA-EDR",
                     "id": u"00037256",
                     "uri": u"http://www.dus.gov.ua/",
@@ -213,6 +215,22 @@ class BaseTenderWebTest(BaseTenderUAWebTest):
                 "tenderPeriod": {
                     "startDate": (now - timedelta(days=28)).isoformat(),
                     "endDate": (now + (timedelta(minutes=2) if SANDBOX_MODE else timedelta(days=2))).isoformat(),
+                },
+            },
+        )
+
+    def set_complaint_period_end(self):
+        now = get_now()
+        self.set_status(
+            "active.tendering",
+            {
+                "enquiryPeriod": {
+                    "startDate": (now - timedelta(days=27)).isoformat(),
+                    "endDate": (now - (timedelta(minutes=2) if SANDBOX_MODE else timedelta(days=2))).isoformat(),
+                },
+                "tenderPeriod": {
+                    "startDate": (now - timedelta(days=27)).isoformat(),
+                    "endDate": (now + (timedelta(minutes=3) if SANDBOX_MODE else timedelta(days=3))).isoformat(),
                 },
             },
         )

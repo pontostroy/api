@@ -1,4 +1,5 @@
 from openprocurement.tender.belowthreshold.tests.base import test_claim, test_draft_claim, test_draft_complaint
+from openprocurement.api.constants import RELEASE_2020_04_19
 from openprocurement.api.utils import get_now
 from datetime import timedelta
 from mock import patch
@@ -138,6 +139,10 @@ def create_tender_lot_complaint(self):
     self.assertEqual(response.status, "403 Forbidden")
     self.assertEqual(response.content_type, "application/json")
     self.assertEqual(response.json["errors"][0]["description"], "Can't update complaint in current (resolved) status")
+
+    set_complaint_period_end = getattr(self, "set_complaint_period_end", None)
+    if RELEASE_2020_04_19 < get_now() and set_complaint_period_end:
+        set_complaint_period_end()
 
     self.cancel_tender()
 

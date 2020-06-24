@@ -26,8 +26,8 @@ from openprocurement.tender.core.models import (
     ITender,
     Bid as BaseBid,
     Contract as BaseContract,
-    Cancellation as BaseCancellation,
     Lot as BaseLot,
+    ConfidentialDocumentModelType,
     EUConfidentialDocument,
     EUDocument,
     LotValue as BaseLotValue,
@@ -46,6 +46,7 @@ from openprocurement.tender.core.models import (
     validate_parameters_uniq,
     bids_validation_wrapper,
     PROCURING_ENTITY_KINDS,
+    QualificationMilestoneListMixin,
 )
 from openprocurement.tender.core.utils import (
     calculate_tender_business_date,
@@ -54,6 +55,7 @@ from openprocurement.tender.core.utils import (
     has_unanswered_complaints,
     calculate_complaint_business_date,
     calculate_clarifications_business_date,
+    extend_next_check_by_complaint_period_ends,
 )
 from openprocurement.tender.belowthreshold.models import Tender as BaseTender
 from openprocurement.tender.core.validation import validate_lotvalue_value, validate_relatedlot
@@ -62,6 +64,7 @@ from openprocurement.tender.openua.models import (
     Award as BaseAward,
     Item as BaseItem,
     Tender as OpenUATender,
+    Cancellation as BaseCancellation,
     Parameter,
 )
 from openprocurement.tender.openua.constants import COMPLAINT_SUBMIT_TIME, ENQUIRY_STAND_STILL_TIME, AUCTION_PERIOD_TIME
@@ -166,9 +169,6 @@ class Contract(BaseContract):
 
 
 class Complaint(BaseComplaint):
-    class Options:
-        roles = {"active.pre-qualification": view_bid_role, "active.pre-qualification.stand-still": view_bid_role}
-
     documents = ListType(ModelType(EUDocument, required=True), default=list())
 
     def serialize(self, role=None, context=None):
@@ -392,10 +392,10 @@ class Bid(BaseBid):
             "deleted": whitelist("id", "status"),
         }
 
-    documents = ListType(ModelType(EUConfidentialDocument, required=True), default=list())
-    financialDocuments = ListType(ModelType(EUConfidentialDocument, required=True), default=list())
-    eligibilityDocuments = ListType(ModelType(EUConfidentialDocument, required=True), default=list())
-    qualificationDocuments = ListType(ModelType(EUConfidentialDocument, required=True), default=list())
+    documents = ListType(ConfidentialDocumentModelType(EUConfidentialDocument, required=True), default=list())
+    financialDocuments = ListType(ConfidentialDocumentModelType(EUConfidentialDocument, required=True), default=list())
+    eligibilityDocuments = ListType(ConfidentialDocumentModelType(EUConfidentialDocument, required=True), default=list())
+    qualificationDocuments = ListType(ConfidentialDocumentModelType(EUConfidentialDocument, required=True), default=list())
     lotValues = ListType(ModelType(LotValue, required=True), default=list())
     selfQualified = BooleanType(required=True, choices=[True])
     selfEligible = BooleanType(required=True, choices=[True])
@@ -471,7 +471,7 @@ class Award(BaseAward):
         pass
 
 
-class Qualification(Model):
+class Qualification(QualificationMilestoneListMixin):
     """ Pre-Qualification """
 
     class Options:
@@ -627,7 +627,7 @@ class Tender(BaseTender):
     central_accreditations = (ACCR_5,)
     edit_accreditations = (ACCR_4,)
 
-    procuring_entity_kinds = ["general", "special", "defense", "central"]
+    procuring_entity_kinds = ["authority", "central", "defense", "general", "social", "special"]
 
     block_tender_complaint_status = OpenUATender.block_tender_complaint_status
     block_complaint_status = OpenUATender.block_complaint_status
@@ -648,8 +648,11 @@ class Tender(BaseTender):
         acl.extend(
             [
                 (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_complaint"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_contract"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "upload_contract_documents"),
             ]
         )
+
         self._acl_cancellation_complaint(acl)
         return acl
 
@@ -728,7 +731,9 @@ class Tender(BaseTender):
             and not any([i.status in self.block_complaint_status for a in self.awards for i in a.complaints])
         ):
             standStillEnds = [
-                a.complaintPeriod.endDate.astimezone(TZ) for a in self.awards if a.complaintPeriod.endDate
+                a.complaintPeriod.endDate.astimezone(TZ)
+                for a in self.awards
+                if a.complaintPeriod and a.complaintPeriod.endDate
             ]
             last_award_status = self.awards[-1].status if self.awards else ""
             if standStillEnds and last_award_status == "unsuccessful":
@@ -749,7 +754,9 @@ class Tender(BaseTender):
                     [i.status in self.block_complaint_status for a in lot_awards for i in a.complaints]
                 )
                 standStillEnds = [
-                    a.complaintPeriod.endDate.astimezone(TZ) for a in lot_awards if a.complaintPeriod.endDate
+                    a.complaintPeriod.endDate.astimezone(TZ)
+                    for a in lot_awards
+                    if a.complaintPeriod and a.complaintPeriod.endDate
                 ]
                 last_award_status = lot_awards[-1].status if lot_awards else ""
                 if (
@@ -763,6 +770,9 @@ class Tender(BaseTender):
             for award in self.awards:
                 if award.status == "active" and not any([i.awardID == award.id for i in self.contracts]):
                     checks.append(award.date)
+
+        extend_next_check_by_complaint_period_ends(self, checks)
+
         return min(checks).isoformat() if checks else None
 
     def validate_tenderPeriod(self, data, period):

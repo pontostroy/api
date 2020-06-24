@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 import unittest
-import mock
+from mock import patch
 from datetime import timedelta
 
 from openprocurement.api.utils import get_now
 from openprocurement.api.tests.base import snitch
 
 from openprocurement.tender.belowthreshold.tests.base import test_lots, test_cancellation
+from openprocurement.api.constants import RELEASE_2020_04_19
 from openprocurement.tender.belowthreshold.tests.cancellation import (
     TenderCancellationResourceTestMixin,
     TenderCancellationDocumentResourceTestMixin,
@@ -27,6 +28,8 @@ from openprocurement.tender.openua.tests.cancellation_blanks import (
     cancellation_unsuccessful_award,
     # TenderCancellationResourceTest
     create_tender_cancellation,
+    create_cancellation_with_tender_complaint,
+    create_cancellation_with_award_complaint,
     patch_tender_cancellation,
     create_tender_cancellation_before_19_04_2020,
     patch_tender_cancellation_before_19_04_2020,
@@ -38,13 +41,18 @@ from openprocurement.tender.openua.tests.cancellation_blanks import (
     patch_tender_cancellation_complaint,
     get_tender_cancellation_complaints,
     access_create_tender_cancellation_complaint,
+    create_cancellation_in_award_complaint_period,
+    create_tender_cancellation_with_cancellation_lots,
+    bot_patch_tender_cancellation_complaint,
 )
 
 
 class TenderCancellationComplaintResourceTestMixin(object):
+
     test_create_tender_cancellation_complaint = snitch(create_tender_cancellation_complaint)
     test_patch_tender_cancellation_complaint = snitch(patch_tender_cancellation_complaint)
     test_get_tender_cancellation_complaints = snitch(get_tender_cancellation_complaints)
+    test_bot_patch_tender_cancellation_complaint = snitch(bot_patch_tender_cancellation_complaint)
 
 
 class TenderCancellationResourceNewReleaseTestMixin(object):
@@ -55,6 +63,12 @@ class TenderCancellationResourceNewReleaseTestMixin(object):
     test_create_tender_cancellation_2020_04_19 = snitch(create_tender_cancellation_2020_04_19)
     test_patch_tender_cancellation_2020_04_19 = snitch(patch_tender_cancellation_2020_04_19)
     test_permission_cancellation_pending = snitch(permission_cancellation_pending)
+    test_create_cancellation_with_tender_complaint = snitch(create_cancellation_with_tender_complaint)
+
+
+class TenderAwardsCancellationResourceTestMixin(object):
+    test_create_cancellation_in_award_complaint_period = snitch(create_cancellation_in_award_complaint_period)
+    test_create_cancellation_with_award_complaint = snitch(create_cancellation_with_award_complaint)
 
 
 class TenderCancellationResourceTest(
@@ -78,10 +92,14 @@ class TenderLotsCancellationResourceTest(BaseTenderUAContentWebTest):
     initial_lots = 2 * test_lots
 
     test_create_tender_lots_cancellation = snitch(create_tender_lots_cancellation)
+    test_create_tender_cancellation_with_cancellation_lots = snitch(create_tender_cancellation_with_cancellation_lots)
     # test_patch_tender_lots_cancellation = snitch(patch_tender_lots_cancellation)
 
 
-class TenderAwardsCancellationResourceTest(BaseTenderUAContentWebTest):
+class TenderAwardsCancellationResourceTest(
+    BaseTenderUAContentWebTest,
+    TenderAwardsCancellationResourceTestMixin
+):
     initial_lots = 2 * test_lots
     initial_status = "active.auction"
     initial_bids = test_bids
@@ -95,12 +113,9 @@ class TenderCancellationComplaintResourceTest(
 ):
     initial_bids = test_bids
 
-    @mock.patch("openprocurement.tender.core.models.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.validation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.models.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.validation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
     def setUp(self):
         super(TenderCancellationComplaintResourceTest, self).setUp()
 
@@ -124,6 +139,7 @@ class TenderCancellationDocumentResourceTest(
 ):
     def setUp(self):
         super(TenderCancellationDocumentResourceTest, self).setUp()
+
         # Create cancellation
         response = self.app.post_json(
             "/tenders/{}/cancellations?acc_token={}".format(self.tender_id, self.tender_token),

@@ -37,6 +37,9 @@ tenderer = {
 author = deepcopy(tenderer)
 del author['scale']
 
+complaint_author = deepcopy(author)
+complaint_author["identifier"]["legalName"] = u"ДКП «Школяр»"
+
 tenderer2 = {
     "address": {
         "countryName": "Україна",
@@ -236,7 +239,7 @@ lot_bid3 = {
     "tenderers": [tenderer3],
     "lotValues": [{
         "value": {
-            "amount": 5
+            "amount": 485
         },
         "relatedLot": "f" * 32
     }]
@@ -332,7 +335,7 @@ complaint = {
     "title": "Недостатньо інформації",
     "status": "draft",
     "type": "complaint",
-    'author': author
+    'author': complaint_author,
 }
 
 

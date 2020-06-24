@@ -8,8 +8,25 @@ services:
       SANDBOX_MODE: 'True'
     depends_on:
       - couchdb
+    volumes:
+      - "./src:/app/src:delegated"
+      - "./docs:/app/docs:delegated"
+    ports:
+      - "8000:80"
+    command: sleep infinity
+  test:
+    build:
+      context: .
+      dockerfile: DockerfileTest
+    depends_on:
+      - couchdb
+    volumes:
+      - "./src/openprocurement:/app/src/openprocurement:delegated"
+      - "./docs:/app/docs:delegated"
   couchdb:
     image: "couchdb:1.6"
     environment:
       COUCHDB_USER: op
       COUCHDB_PASSWORD: op
+    ports:
+      - "5984:5984"

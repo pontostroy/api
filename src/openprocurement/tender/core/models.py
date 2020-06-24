@@ -12,9 +12,11 @@ from schematics.types import StringType, FloatType, URLType, BooleanType, BaseTy
 from urlparse import urlparse, parse_qs
 from string import hexdigits
 from openprocurement.api.interfaces import IOPContent
+from openprocurement.api.auth import extract_access_token
 from openprocurement.api.models import (
     Revision,
     Organization,
+    Identifier,
     Model,
     Period,
     IsoDateTimeType,
@@ -31,7 +33,7 @@ from openprocurement.api.models import schematics_default_role, schematics_embed
 from openprocurement.api.validation import validate_items_uniq
 from openprocurement.api.utils import (
     get_now, get_first_revision_date, get_root, generate_docservice_url,
-    get_uah_amount_from_value
+    get_uah_amount_from_value,
 )
 from openprocurement.api.constants import (
     SANDBOX_MODE,
@@ -42,6 +44,7 @@ from openprocurement.api.constants import (
     MPC_REQUIRED_FROM,
     MILESTONES_VALIDATION_FROM,
     RELEASE_2020_04_19,
+    COMPLAINT_IDENTIFIER_REQUIRED_FROM,
 )
 from openprocurement.api.auth import ACCR_1, ACCR_2, ACCR_5
 
@@ -54,7 +57,11 @@ from openprocurement.tender.core.constants import (
 )
 from openprocurement.tender.core.utils import (
     calc_auction_end_time, rounding_shouldStartAfter,
-    restrict_value_to_bounds, round_up_to_ten
+    restrict_value_to_bounds, round_up_to_ten,
+    get_contract_supplier_roles, get_contract_supplier_permissions,
+    calculate_tender_business_date,
+    calculate_complaint_business_date,
+    prepare_award_milestones,
 )
 from openprocurement.tender.core.validation import (
     validate_lotvalue_value,
@@ -65,7 +72,12 @@ from openprocurement.tender.core.validation import (
     validate_bid_value,
     validate_relatedlot,
 )
-from openprocurement.planning.api.models import PlanOrganization
+from openprocurement.tender.esco.utils import get_complaint_amount as get_esco_complaint_amount
+from openprocurement.planning.api.models import BaseOrganization
+from logging import getLogger
+
+
+LOGGER = getLogger(__name__)
 
 
 view_bid_role = blacklist("owner_token", "owner", "transfer_token") + schematics_default_role
@@ -162,6 +174,26 @@ class Document(BaseDocument):
                 raise ValidationError(u"relatedItem should be one of items")
 
 
+class ConfidentialDocumentModelType(ModelType):
+    def export_loop(self, model_instance, field_converter, role=None, print_none=False):
+        if isinstance(model_instance, self.model_class):
+            model_class = model_instance.__class__
+        else:
+            model_class = self.model_class
+
+        if role not in ["create", "edit", "plain", None] and hasattr(model_instance, "view_role"):
+            role = model_instance.view_role()
+
+        shaped = export_loop(model_class, model_instance, field_converter, role=role, print_none=print_none)
+
+        if shaped and len(shaped) == 0 and self.allow_none():
+            return shaped
+        elif shaped:
+            return shaped
+        elif print_none:
+            return shaped
+
+
 class ConfidentialDocument(Document):
 
     class Options:
@@ -171,6 +203,30 @@ class ConfidentialDocument(Document):
 
     confidentiality = StringType(choices=["public", "buyerOnly"])
     confidentialityRationale = StringType()
+
+    def view_role(self):
+        root = self.get_root()
+        request = root.request
+
+        parent = self.__parent__
+        tender = parent.__parent__
+
+        acc_token = extract_access_token(request)
+        auth_user_id = request.authenticated_userid
+
+        is_owner = (auth_user_id == parent.owner and acc_token == parent.owner_token)
+        is_tender_owner = (auth_user_id == tender.owner and acc_token == tender.owner_token)
+        access_roles = ["aboveThresholdReviewers", "sas"]
+
+        if (
+            not is_owner
+            and not is_tender_owner
+            and request.authenticated_role not in access_roles
+            and self.confidentiality == "buyerOnly"
+        ):
+            return "restricted_view"
+
+        return "view"
 
     def validate_confidentialityRationale(self, data, val):
         confidentiality = data.get("confidentiality")
@@ -369,7 +425,9 @@ class Contract(BaseContract):
     class Options:
         roles = {
             "create": blacklist("id", "status", "date", "documents", "dateSigned"),
-            "edit": blacklist("id", "documents", "date", "awardID", "suppliers", "items", "contractID"),
+            "admins": blacklist("id", "documents", "date", "awardID", "suppliers", "items", "contractID"),
+            "edit_tender_owner": blacklist("id", "documents", "date", "awardID", "suppliers", "items", "contractID"),
+            "edit_contract_supplier": whitelist("status"),
             "embedded": schematics_embedded_role,
             "view": schematics_default_role,
         }
@@ -377,6 +435,23 @@ class Contract(BaseContract):
     value = ModelType(ContractValue)
     awardID = StringType(required=True)
     documents = ListType(ModelType(Document, required=True), default=list())
+
+    def __acl__(self):
+        return get_contract_supplier_permissions(self)
+
+    def get_role(self):
+        root = self.get_root()
+        request = root.request
+        if request.authenticated_role in ("tender_owner", "contract_supplier"):
+            role = "edit_{}".format(request.authenticated_role)
+        else:
+            role = request.authenticated_role
+        return role
+
+    def __local_roles__(self):
+        roles = {}
+        roles.update(get_contract_supplier_roles(self))
+        return roles
 
     def validate_awardID(self, data, awardID):
         parent = data["__parent__"]
@@ -548,7 +623,7 @@ class Bid(Model):
                 raise ValidationError(u"All features parameters is required.")
 
 
-PROCURING_ENTITY_KINDS = ("general", "special", "defense", "central", "other")
+PROCURING_ENTITY_KINDS = ("authority", "central", "defense", "general", "other", "social", "special")
 
 
 class ProcuringEntity(Organization):
@@ -608,6 +683,44 @@ class Question(Model):
                 raise ValidationError(u"relatedItem should be one of items")
 
 
+class ComplaintIdentifier(Identifier):
+    class Options:
+        roles = {
+            "draft_complaint": whitelist("uri", "legalName_ru", "legalName_en"),
+        }
+
+    def validate_id(self, data, identifier_id):
+        if not identifier_id:
+            complaint = data["__parent__"]["__parent__"]
+            if complaint.type == "complaint":
+                tender = get_root(data["__parent__"])
+                if get_first_revision_date(tender, default=get_now()) > COMPLAINT_IDENTIFIER_REQUIRED_FROM:
+                    raise ValidationError(u"This field is required.")
+
+    def validate_legalName(self, data, legalName):
+        if not legalName:
+            complaint = data["__parent__"]["__parent__"]
+            if complaint.type == "complaint":
+                tender = get_root(data["__parent__"])
+                if get_first_revision_date(tender, default=get_now()) > COMPLAINT_IDENTIFIER_REQUIRED_FROM:
+                    raise ValidationError(u"This field is required.")
+
+
+class ComplaintOrganization(Organization):
+    identifier = ModelType(ComplaintIdentifier, required=True)
+
+
+class ComplaintAuthorModelType(ModelType):
+    def export_loop(self, model_instance, field_converter, role=None, print_none=False):
+        if role == "draft" and getattr(model_instance.__parent__, "type") == "complaint":
+            request = model_instance.get_root().request
+            tender = request.validated["tender"]
+            if get_first_revision_date(tender, default=get_now()) > COMPLAINT_IDENTIFIER_REQUIRED_FROM:
+                role = "draft_complaint"
+        return super(ComplaintAuthorModelType, self).export_loop(model_instance, field_converter,
+                                                                 role=role, print_none=print_none)
+
+
 class Complaint(Model):
     class Options:
         roles = {
@@ -620,15 +733,26 @@ class Complaint(Model):
             "review": whitelist("decision", "status"),
             "view": view_bid_role,
             "view_claim": (blacklist("author") + view_bid_role),
-            "active.enquiries": view_bid_role,
-            "active.tendering": view_bid_role,
-            "active.auction": view_bid_role,
-            "active.qualification": view_bid_role,
-            "active.awarded": view_bid_role,
-            "complete": view_bid_role,
-            "unsuccessful": view_bid_role,
-            "cancelled": view_bid_role,
+            "Administrator": whitelist("value"),
         }
+        for _tender_status in (
+            "active.enquiries",
+            "active.tendering",
+            "active.auction",
+            "active.qualification",
+            "active.awarded",
+            "complete",
+            "unsuccessful",
+            "cancelled",
+            "active.pre-qualification",  # openeu
+            "active.pre-qualification.stand-still",
+            "active.qualification.stand-still",  # cfaua
+            "active.stage2.pending",  # competitive dialogue
+            "active.stage2.waiting",
+            "draft.stage2",
+            "active",  # limited
+        ):  # if there is no role, all the fields including(tokens) will be shown if context is the tender
+            roles[_tender_status] = view_bid_role
 
     # system
     id = MD5Type(required=True, default=lambda: uuid4().hex)
@@ -658,7 +782,7 @@ class Complaint(Model):
     owner = StringType()
     relatedLot = MD5Type()
     # complainant
-    author = ModelType(Organization, required=True)  # author of claim
+    author = ComplaintAuthorModelType(ComplaintOrganization, required=True)  # author of claim
     title = StringType(required=True)  # title of the claim
     description = StringType()  # description of the claim
     dateSubmitted = IsoDateTimeType()
@@ -679,6 +803,15 @@ class Complaint(Model):
     dateCanceled = IsoDateTimeType()
 
     value = ModelType(Guarantee)
+    rejectReason = StringType(choices=[
+        "buyerViolationsCorrected",
+        "lawNonCompliance",
+        "alreadyExists",
+        "tenderCancelled",
+        "cancelledByComplainant",
+        "complaintPeriodEnded",
+        "incorrectPayment"
+    ])
 
     @serializable(serialized_name="value", serialize_when_none=False)
     def calculate_value(self):
@@ -688,19 +821,7 @@ class Complaint(Model):
             tender = request.validated["tender"]
             if get_first_revision_date(tender, default=get_now()) > RELEASE_2020_04_19:
                 if tender["procurementMethodType"] == "esco":
-                    if tender["status"] in ("active.tendering", "active.pre-qualification.stand-still"):
-                        amount = COMPLAINT_MIN_AMOUNT
-                    else:
-                        if "award" not in request.validated or request.validated["award"]["value"] is None:
-                            return  # value can be empty None ?
-                        base_amount = get_uah_amount_from_value(
-                            request, request.validated["award"]["value"], {"complaint_id": self.id}
-                        )
-                        amount = restrict_value_to_bounds(
-                            base_amount * COMPLAINT_ENHANCED_AMOUNT_RATE,
-                            COMPLAINT_ENHANCED_MIN_AMOUNT,
-                            COMPLAINT_ENHANCED_MAX_AMOUNT
-                        )
+                    amount = get_esco_complaint_amount(request, tender, self)
                 else:
                     related_lot = self.get_related_lot_obj(tender)
                     value = related_lot["value"] if related_lot else tender["value"]
@@ -734,13 +855,17 @@ class Complaint(Model):
         root = self.get_root()
         request = root.request
         data = request.json_body["data"]
-        if request.authenticated_role == "complaint_owner" and data.get("status", self.status) == "cancelled":
+        auth_role = request.authenticated_role
+        status = data.get("status", self.status)
+        if auth_role == "Administrator":
+            role = auth_role
+        elif auth_role == "complaint_owner" and status == "cancelled":
             role = "cancellation"
-        elif request.authenticated_role == "complaint_owner" and self.status == "draft":
+        elif auth_role == "complaint_owner" and self.status == "draft":
             role = "draft"
-        elif request.authenticated_role == "tender_owner" and self.status == "claim":
+        elif auth_role == "tender_owner" and self.status == "claim":
             role = "answer"
-        elif request.authenticated_role == "complaint_owner" and self.status == "answered":
+        elif auth_role == "complaint_owner" and self.status == "answered":
             role = "satisfy"
         else:
             role = "invalid"
@@ -776,84 +901,20 @@ class Complaint(Model):
         parent = data["__parent__"]
         if relatedLot and isinstance(parent, Model):
             validate_relatedlot(get_tender(parent), relatedLot)
-            
+
     def get_related_lot_obj(self, tender):
-        lot_id = self.get("relatedLot") or self.get("__parent__").get("lotID")
+        lot_id = (
+            self.get("relatedLot")  # tender lot
+            or self.get("__parent__").get("lotID")  # award or qualification
+            or self.get("__parent__").get("relatedLot")  # cancellation
+        )
         if lot_id:
             for lot in tender.get("lots", ""):
                 if lot["id"] == lot_id:
                     return lot
 
 
-class CancellationComplaint(Complaint):
-    class Options:
-        roles = {
-            "create": whitelist("author", "title", "description", "status", "relatedLot"),
-            "draft": whitelist("author", "title", "description", "status"),
-            "cancellation": whitelist("cancellationReason", "status"),
-            "satisfy": whitelist("satisfied", "status"),
-            "resolve": whitelist("status", "tendererAction"),
-            "action": whitelist("tendererAction"),
-            "pending": whitelist("decision", "status", "rejectReason", "rejectReasonDescription"),
-            "review": whitelist("decision", "status", "reviewDate", "reviewPlace"),
-            "embedded": (blacklist("owner_token", "owner", "transfer_token", "bid_id") + schematics_embedded_role),
-            "view": (blacklist("owner_token", "owner", "transfer_token", "bid_id") + schematics_default_role),
-        }
-
-    def get_role(self):
-        root = self.get_root()
-        request = root.request
-        data = request.json_body["data"]
-
-        if request.authenticated_role == "complaint_owner" and data.get("status", self.status) == "cancelled":
-            role = "cancellation"
-        elif (
-                request.authenticated_role == "complaint_owner"
-                and self.status in ["pending", "accepted"]
-                and data.get("status", self.status) == "stopping"
-        ):
-            role = "cancellation"
-        elif request.authenticated_role == "complaint_owner" and self.status == "draft":
-            role = "draft"
-        elif request.authenticated_role == "tender_owner" and self.status == "pending":
-            role = "action"
-        elif request.authenticated_role == "tender_owner" and self.status == "satisfied":
-            role = "resolve"
-        elif request.authenticated_role == "aboveThresholdReviewers" and self.status == "pending":
-            role = "pending"
-        elif request.authenticated_role == "aboveThresholdReviewers" and self.status in ["accepted", "stopping"]:
-            role = "review"
-        else:
-            role = "invalid"
-        return role
-
-    def __acl__(self):
-        return [
-            (Allow, "g:aboveThresholdReviewers", "edit_complaint"),
-            (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_complaint"),
-            (Allow, "{}_{}".format(self.owner, self.owner_token), "upload_complaint_documents"),
-        ]
-
-    status = StringType(
-        choices=[
-            "draft",
-            "pending",
-            "accepted",
-            "invalid",
-            "resolved",
-            "declined",
-            "satisfied",
-            "stopped",
-            "mistaken",
-        ],
-        default="draft",
-    )
-    type = StringType(
-        choices=["claim", "complaint"], default="complaint",
-    )
-
-
-class BaseCancellation(Model):
+class Cancellation(Model):
     class Options:
         roles = {
             "create": whitelist("reason", "status", "reasonType", "cancellationOf", "relatedLot"),
@@ -865,8 +926,7 @@ class BaseCancellation(Model):
     @serializable(serialized_name="status")
     def default_status(self):
         if not self.status:
-            if get_first_revision_date(self.__parent__, default=get_now()) > RELEASE_2020_04_19 \
-                    and self.cancellationOf == "tender":
+            if get_first_revision_date(self.__parent__, default=get_now()) > RELEASE_2020_04_19:
                 return "draft"
             return "pending"
         return self.status
@@ -900,11 +960,11 @@ class BaseCancellation(Model):
         tender = get_root(data["__parent__"])
         cancellation_of = data.get('cancellationOf')
 
-        choices = self._after_release_status_choices \
-            if (
-                get_first_revision_date(tender, default=get_now()) > RELEASE_2020_04_19
-                and cancellation_of == "tender"
-            ) else self._before_release_status_choices
+        choices = (
+            self._after_release_status_choices
+            if get_first_revision_date(tender, default=get_now()) > RELEASE_2020_04_19
+            else self._before_release_status_choices
+        )
 
         if value and value not in choices:
             raise ValidationError("Value must be one of %s" % choices)
@@ -931,11 +991,6 @@ class BaseCancellation(Model):
             raise ValidationError("Value must be one of %s" % choices)
 
 
-class Cancellation(BaseCancellation):
-    complaintPeriod = ModelType(Period)
-    complaints = ListType(ModelType(CancellationComplaint), default=list())
-
-
 class BaseAward(Model):
     """ Base award """
 
@@ -954,6 +1009,50 @@ class BaseAward(Model):
     suppliers = ListType(ModelType(BusinessOrganization, required=True), required=True, min_size=1, max_size=1)
     documents = ListType(ModelType(Document, required=True), default=list())
     items = ListType(ModelType(Item, required=True))
+
+
+class QualificationMilestone(Model):
+    id = MD5Type(required=True, default=lambda: uuid4().hex)
+    CODE_24_HOURS = "24h"
+    CODE_LOW_PRICE = "alp"
+    code = StringType(required=True, choices=[CODE_24_HOURS, CODE_LOW_PRICE])
+    dueDate = IsoDateTimeType()
+    description = StringType()
+    date = IsoDateTimeType(default=get_now)
+
+    class Options:
+        namespace = "Milestone"
+        roles = {
+            "create": whitelist("code", "description"),
+            "Administrator": whitelist("dueDate"),
+            "view": schematics_default_role,
+        }
+
+    @serializable(serialized_name="dueDate")
+    def set_due_date(self):
+        if not self.dueDate:
+            if self.code == self.CODE_24_HOURS:
+                self.dueDate = calculate_tender_business_date(
+                    self.date, timedelta(hours=24), get_tender(self)
+                )
+            elif self.code == self.CODE_LOW_PRICE:
+                self.dueDate = calculate_complaint_business_date(
+                    self.date, timedelta(days=1), get_tender(self), working_days=True,
+                )
+        return self.dueDate and self.dueDate.isoformat()
+
+
+class QualificationMilestoneListMixin(Model):
+    milestones = ListType(ModelType(QualificationMilestone, required=True), default=list())
+
+    def validate_milestones(self, data, milestones):
+        """
+        This validation on the model, not on the view
+        because there is a way to post milestone to different zones (couchdb masters)
+        and concord will merge them, that shouldn't be the case
+        """
+        if len(filter(lambda m: m.code == QualificationMilestone.CODE_24_HOURS, milestones)) > 1:
+            raise ValidationError(u"There can be only one '24h' milestone")
 
 
 class Award(BaseAward):
@@ -1293,7 +1392,7 @@ class BaseTender(OpenprocurementSchematicsDocument, Model):
     )
     mainProcurementCategory = StringType(choices=["goods", "services", "works"])
     milestones = ListType(ModelType(Milestone, required=True), validators=[validate_items_uniq, validate_milestones])
-    buyers = ListType(ModelType(PlanOrganization, required=True), default=list())
+    buyers = ListType(ModelType(BaseOrganization, required=True), default=list())
     plans = ListType(ModelType(PlanRelation, required=True), default=list())
 
     def link_plan(self, plan_id):
@@ -1365,12 +1464,12 @@ class BaseTender(OpenprocurementSchematicsDocument, Model):
         accept_tender = all([
             any([j.status == "resolved" for j in i.complaints])
             for i in self.cancellations
-            if i.status == "unsuccessful" and getattr(i, "complaints", None)
+            if i.status == "unsuccessful" and getattr(i, "complaints", None) and not i.relatedLot
         ])
 
         if (
             old_rules
-            or (not any([i.status == "pending" and i.cancellationOf == "tender" for i in self.cancellations])
+            or (not any([i.status == "pending" and not i.relatedLot for i in self.cancellations])
                 and accept_tender)
         ):
             acl.extend(
@@ -1395,6 +1494,25 @@ class BaseTender(OpenprocurementSchematicsDocument, Model):
             ]
 
         acl.extend(acl_cancellation_complaints)
+
+    def append_award(self, bid,  all_bids, lot_id=None):
+        now = get_now()
+        award_data = {
+            "bid_id": bid["id"],
+            "lotID": lot_id,
+            "status": "pending",
+            "date": now,
+            "value": bid["value"],
+            "suppliers": bid["tenderers"],
+        }
+        # append an "alp" milestone if it's the case
+        award_class = self.__class__.awards.model_class
+        if hasattr(award_class, "milestones"):
+            award_data["milestones"] = prepare_award_milestones(self, bid, all_bids, lot_id)
+
+        award = award_class(award_data)
+        award.__parent__ = self
+        self.awards.append(award)
 
 
 class Tender(BaseTender):
@@ -1459,6 +1577,8 @@ class Tender(BaseTender):
         acl.extend(
             [
                 (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_complaint"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "edit_contract"),
+                (Allow, "{}_{}".format(self.owner, self.owner_token), "upload_contract_documents"),
             ]
         )
         self._acl_cancellation_complaint(acl)

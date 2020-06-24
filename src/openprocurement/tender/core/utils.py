@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
+import jmespath
 from decimal import Decimal
 from re import compile
 
-from dateorro import calc_datetime, calc_working_datetime, calc_normalized_datetime
+from dateorro import (
+    calc_datetime,
+    calc_working_datetime,
+    calc_normalized_datetime,
+)
+from dateorro.calculations import check_working_datetime
 from jsonpointer import resolve_pointer
 from functools import partial
 from datetime import datetime, time, timedelta
@@ -10,6 +16,7 @@ from logging import getLogger
 from time import sleep
 from pyramid.exceptions import URLDecodeError
 from pyramid.compat import decode_path_info
+from pyramid.security import Allow
 from cornice.resource import resource
 from couchdb.http import ResourceConflict
 from openprocurement.api.constants import (
@@ -34,8 +41,12 @@ from openprocurement.tender.core.constants import (
     SERVICE_TIME,
     AUCTION_STAND_STILL_TIME,
     NORMALIZED_COMPLAINT_PERIOD_FROM,
+    ALP_MILESTONE_REASONS,
 )
 from openprocurement.tender.core.traversal import factory
+from jsonpointer import JsonPointerException
+from jsonpatch import JsonPatchException, apply_patch as apply_json_patch
+from barbecue import chef
 import math
 
 LOGGER = getLogger("openprocurement.tender.core")
@@ -339,6 +350,23 @@ def calculate_clarifications_business_date(date_obj, timedelta_obj, tender=None,
     return calculate_tender_date(source_date_obj, timedelta_obj, tender, working_days, calendar)
 
 
+def calculate_date_diff(dt1, dt2, working_days=True, calendar=WORKING_DAYS):
+    if not working_days:
+        return dt1 - dt2
+
+    date2 = dt2
+
+    days = 0
+    while dt1.date() > date2.date():
+        date2 += timedelta(days=1)
+        if check_working_datetime(date2, calendar=calendar):
+            days += 1
+
+    diff = dt1 - date2
+
+    return timedelta(days) + diff
+
+
 def requested_fields_changes(request, fieldnames):
     changed_fields = request.validated["json_data"].keys()
     return set(fieldnames) & set(changed_fields)
@@ -371,58 +399,365 @@ def round_up_to_ten(value):
 
 
 def calculate_total_complaints(tender):
-    total_complaints = sum([len(i.complaints) for i in tender.cancellations])
+    total_complaints = sum([len(i.get("complaints", [])) for i in tender.cancellations])
 
     if hasattr(tender, "awards"):
         total_complaints += sum([len(i.complaints) for i in tender.awards])
+
     if hasattr(tender, "complaints"):
         total_complaints += len(tender.complaints)
 
     if hasattr(tender, "qualifications"):
-        total_complaints = sum(
-            [len(i.complaints) for i in tender.qualifications],
-            total_complaints
-        )
+        total_complaints += sum([len(i.complaints) for i in tender.qualifications])
 
     return total_complaints
 
 
-def cancel_tender(request):
-    tender = request.validated["tender"]
-    if tender.status in ["active.tendering", "active.auction"]:
-        tender.bids = []
-    tender.status = "cancelled"
+from openprocurement.tender.core.validation import validate_absence_of_pending_accepted_satisfied_complaints
 
 
-def check_cancellation_status(request, cancel_tender_method=cancel_tender):
+class CancelTenderLot(object):
+
+    def __call__(self, request, cancellation):
+        if cancellation.status == "active":
+            validate_absence_of_pending_accepted_satisfied_complaints(request, cancellation)
+            if cancellation.relatedLot:
+                self.cancel_lot(request, cancellation)
+            else:
+                self.cancel_tender(request)
+
+    @staticmethod
+    def add_next_award_method(request):
+        raise NotImplementedError
+
+    def cancel_tender(self, request):
+        tender = request.validated["tender"]
+        if tender.status in ["active.tendering", "active.auction"]:
+            tender.bids = []
+        tender.status = "cancelled"
+
+    def cancel_lot(self, request, cancellation):
+        tender = request.validated["tender"]
+        self._cancel_lots(tender, cancellation)
+        self._lot_update_check_tender_status(request, tender)
+
+        if tender.status == "active.auction" and all(
+                i.auctionPeriod and i.auctionPeriod.endDate
+                for i in tender.lots
+                if i.numberOfBids > 1 and i.status == "active"
+        ):
+            self.add_next_award_method(request)
+
+    def _lot_update_check_tender_status(self, request, tender):
+        lot_statuses = {lot.status for lot in tender.lots}
+        if lot_statuses == {"cancelled"}:
+            self.cancel_tender(request)
+        elif not lot_statuses.difference({"unsuccessful", "cancelled"}):
+            tender.status = "unsuccessful"
+        elif not lot_statuses.difference({"complete", "unsuccessful", "cancelled"}):
+            tender.status = "complete"
+
+    @staticmethod
+    def _cancel_lots(tender, cancellation):
+        for lot in tender.lots:
+            if lot.id == cancellation.relatedLot:
+                lot.status = "cancelled"
+
+
+def check_cancellation_status(request, cancel_class=CancelTenderLot):
+
     tender = request.validated["tender"]
     cancellations = tender.cancellations
-    complaint_statuses = ["invalid", "declined", "stopped", "mistaken"]
+    complaint_statuses = ["invalid", "declined", "stopped", "mistaken", "draft"]
+
+    cancel_tender_lot = cancel_class()
 
     for cancellation in cancellations:
+        complaint_period = cancellation.complaintPeriod
         if (
             cancellation.status == "pending"
-            and cancellation.complaintPeriod
-            and cancellation.complaintPeriod.endDate <= get_now()
+            and complaint_period
+            and complaint_period.endDate.astimezone(TZ) <= get_now()
             and all([i.status in complaint_statuses for i in cancellation.complaints])
         ):
             cancellation.status = "active"
-            if cancellation.cancellationOf == "tender":
-                cancel_tender_method(request)
+            cancel_tender_lot(request, cancellation)
 
 
 def block_tender(request):
     tender = request.validated["tender"]
     new_rules = get_first_revision_date(tender, default=get_now()) > RELEASE_2020_04_19
 
-    accept_tender = all([
-        any([j.status == "resolved" for j in i.complaints])
-        for i in tender.cancellations
-        if i.status == "unsuccessful" and getattr(i, "complaints", None) and not i.relatedLot
-    ])
+    if not new_rules:
+        return False
 
-    return (
-        new_rules
-        and (any([i.status not in ["active", "unsuccessful"] for i in tender.cancellations if not i.relatedLot])
-             or not accept_tender)
+    if any(i.status == "pending" for i in tender.cancellations):
+        return True
+
+    accept_tender = all(
+        any(j.status == "resolved" for j in i.complaints)
+        for i in tender.cancellations
+        if i.status == "unsuccessful" and getattr(i, "complaints", None)
     )
+
+    return not accept_tender
+
+
+def extend_next_check_by_complaint_period_ends(tender, checks):
+    """
+    should be added to next_check tender methods
+    to schedule switching complaints draft-mistaken and others
+    """
+    # no need to check procedures that don't have cancellation complaints
+    excluded = ("belowThreshold", "closeFrameworkAgreementSelectionUA")
+    for cancellation in tender.cancellations:
+        if cancellation.status == "pending":
+            # adding check
+            complaint_period = getattr(cancellation, "complaintPeriod", None)
+            if complaint_period and complaint_period.endDate and tender.procurementMethodType not in excluded:
+                # this check can switch complaint statuses to mistaken + switch cancellation to active
+                checks.append(cancellation.complaintPeriod.endDate.astimezone(TZ))
+
+    # all the checks below only supposed to trigger complaint draft->mistaken switches
+    # if any object contains a draft complaint, it's complaint end period is added to the checks
+    # periods can be in the past, then the check expected to run once and immediately fix the complaint
+    def has_draft_complaints(item):
+        return any(c.status == "draft" and c.type == "complaint" for c in item.complaints)
+
+    complaint_period = getattr(tender, "complaintPeriod", None)
+    if complaint_period and complaint_period.endDate and has_draft_complaints(tender):
+        checks.append(complaint_period.endDate.astimezone(TZ))
+
+    qualification_period = getattr(tender, "qualificationPeriod", None)
+    if qualification_period and qualification_period.endDate \
+       and any(has_draft_complaints(q) for q in tender.qualifications):
+        checks.append(tender.qualificationPeriod.endDate.astimezone(TZ))
+
+    for award in tender.awards:
+        complaint_period = getattr(award, "complaintPeriod", None)
+        if complaint_period and complaint_period.endDate and has_draft_complaints(award):
+            checks.append(award.complaintPeriod.endDate.astimezone(TZ))
+
+
+def check_complaint_statuses_at_complaint_period_end(tender, now):
+    """
+    this one probably should run before "check_cancellation_status" (that switch pending cancellation to active)
+    so that draft complaints will remain the status
+    also cancellation complaint changes will be able to affect statuses of cancellations
+    """
+    if get_first_revision_date(tender, default=now) < RELEASE_2020_04_19:
+        return
+    # only for tenders from RELEASE_2020_04_19
+
+    def check_complaints(complaints):
+        for complaint in complaints:
+            if complaint.status == "draft" and complaint.type == "complaint":
+                complaint.status = "mistaken"
+                complaint.rejectReason = "complaintPeriodEnded"
+
+    # cancellation complaints
+    for cancellation in tender.cancellations:
+        complaint_period = getattr(cancellation, "complaintPeriod", None)
+        if complaint_period and complaint_period.endDate and cancellation.complaintPeriod.endDate < now:
+            check_complaints(cancellation.complaints)
+
+    # tender complaints
+    complaint_period = getattr(tender, "complaintPeriod", None)
+    if complaint_period and complaint_period.endDate and complaint_period.endDate < now:
+        check_complaints(tender.complaints)
+
+    # tender qualification complaints
+    qualification_period = getattr(tender, "qualificationPeriod", None)
+    if qualification_period and qualification_period.endDate and qualification_period.endDate < now:
+        for qualification in tender.qualifications:
+            check_complaints(qualification.complaints)
+
+    # tender award complaints
+    for award in tender.awards:
+        complaint_period = getattr(award, "complaintPeriod", None)
+        if complaint_period and complaint_period.endDate and complaint_period.endDate < now:
+            check_complaints(award.complaints)
+
+
+def get_contract_supplier_permissions(contract):
+    """
+    Set `upload_contract_document` permissions for award in `active` status owners
+    """
+    suppliers_permissions = []
+    if not hasattr(contract, "__parent__") or 'bids' not in contract.__parent__:
+        return suppliers_permissions
+    win_bid_id = jmespath.search("awards[?id=='{}'].bid_id".format(contract.awardID), contract.__parent__._data)[0]
+    win_bid = jmespath.search("bids[?id=='{}'].[owner,owner_token]".format(win_bid_id), contract.__parent__._data)[0]
+    bid_acl = "_".join(win_bid)
+    suppliers_permissions.extend([(Allow, bid_acl, "upload_contract_documents"), (Allow, bid_acl, "edit_contract")])
+    return suppliers_permissions
+
+
+def get_contract_supplier_roles(contract):
+    roles = {}
+    if 'bids' not in contract.__parent__:
+        return roles
+    bid_id = jmespath.search("awards[?id=='{}'].bid_id".format(contract.awardID), contract.__parent__)[0]
+    bid_data = jmespath.search("bids[?id=='{}'].[owner,owner_token]".format(bid_id), contract.__parent__)[0]
+    roles['_'.join(bid_data)] = 'contract_supplier'
+    return roles
+
+
+def prepare_bids_for_awarding(tender, bids, lot_id=None):
+    """
+    Used by add_next_award method
+    :param tender:
+    :param bids
+    :param lot_id:
+    :return: list of bid dict objects sorted in a way they will be selected as winners
+    """
+    lot_items = [i.id for i in tender.items if i.relatedLot == lot_id]  # all items in case of non-lot tender
+    features = [
+         i for i in (tender.features or [])
+         if i.featureOf == "tenderer"
+         or i.featureOf == "lot" and i.relatedItem == lot_id
+         or i.featureOf == "item" and i.relatedItem in lot_items
+    ]  # all features in case of non-lot tender
+    codes = [i.code for i in features]
+    active_bids = []
+    for bid in bids:
+        if bid.status == "active":
+            bid_params = [i for i in bid.parameters if i.code in codes]
+            if lot_id:
+                for lot_value in bid.lotValues:
+                    if lot_value.relatedLot == lot_id and getattr(lot_value, "status", "active") == "active":
+                        active_bids.append(
+                            {
+                                "id": bid.id,
+                                "value": lot_value.value.serialize(),
+                                "tenderers": bid.tenderers,
+                                "parameters": bid_params,
+                                "date": lot_value.date,
+                            }
+                        )
+                        continue  # only one lotValue in a bid is expected
+            else:
+                active_bids.append(
+                    {
+                        "id": bid.id,
+                        "value": bid.value.serialize(),
+                        "tenderers": bid.tenderers,
+                        "parameters": bid_params,
+                        "date": bid.date,
+                    }
+                )
+    configurator = tender.__parent__.request.content_configurator
+    bids = chef(
+        active_bids, features,
+        ignore="",  # filters by id, shouldn't be a part of this lib
+        reverse=configurator.reverse_awarding_criteria,
+        awarding_criteria_key=configurator.awarding_criteria_key,
+    )
+    return bids
+
+
+def exclude_unsuccessful_awarded_bids(tender, bids, lot_id):
+    lot_awards = [i for i in tender.awards if i.lotID == lot_id]  # all awards in case of non-lot tender
+    ignore_bid_ids = [b.bid_id for b in lot_awards if b.status == "unsuccessful"]
+    bids = filter(lambda b: b["id"] not in ignore_bid_ids, bids)
+    return bids
+
+
+# low price milestones
+def prepare_award_milestones(tender, bid, all_bids, lot_id=None):
+    """
+    :param tender:
+    :param bid: a bid to check
+    :param all_bids: prepared the way that "value" key exists even for multi-lot
+    :param lot_id:
+    :return:
+    """
+    milestones = []
+    if (
+        getattr(tender, "procurementMethodType", "") in ("esco", "aboveThresholdUA.defense")
+        or get_first_revision_date(tender, default=get_now()) < RELEASE_2020_04_19
+    ):
+        return milestones   # skipping
+
+    def ratio_of_two_values(v1, v2):
+        return 1 - Decimal(v1) / Decimal(v2)
+
+    if len(all_bids) > 1:
+        reasons = []
+        amount = bid["value"]["amount"]
+        #  1st criteria
+        mean_value = get_mean_value_tendering_bids(
+            tender, all_bids, lot_id=lot_id, exclude_bid_id=bid["id"],
+        )
+        if ratio_of_two_values(amount, mean_value) >= Decimal("0.4"):
+            reasons.append(ALP_MILESTONE_REASONS[0])
+
+        # 2nd criteria
+        for n, b in enumerate(all_bids):
+            if b["id"] == bid["id"]:
+                index = n
+                break
+        else:
+            raise AssertionError("Selected bid not in the full list")  # should never happen
+        following_index = index + 1
+        if following_index < len(all_bids):  # selected bid has the following one
+            following_bid = all_bids[following_index]
+            following_amount = following_bid["value"]["amount"]
+            if ratio_of_two_values(amount, following_amount) >= Decimal("0.3"):
+                reasons.append(ALP_MILESTONE_REASONS[1])
+        if reasons:
+            milestones.append(
+                {
+                    "code": "alp",
+                    "description": u" / ".join(reasons)
+                }
+            )
+    return milestones
+
+
+def get_mean_value_tendering_bids(tender, bids, lot_id, exclude_bid_id):
+    before_auction_bids = get_bids_before_auction_results(tender)
+    before_auction_bids = prepare_bids_for_awarding(
+        tender, before_auction_bids, lot_id=lot_id,
+    )
+    initial_amounts = {
+        b["id"]: float(b["value"]["amount"])
+        for b in before_auction_bids
+    }
+    initial_values = [
+        initial_amounts[b["id"]]
+        for b in bids
+        if b["id"] != exclude_bid_id  # except the bid being checked
+    ]
+    mean_value = sum(initial_values) / float(len(initial_values))
+    return mean_value
+
+
+def get_bids_before_auction_results(tender):
+    request = tender.__parent__.request
+    if tender.status == "active.auction":  # this request is posting auction results
+        initial_doc = request.validated["tender_src"]
+    else:  # after auction results posted
+        initial_doc = tender.serialize()
+        auction_revisions = [revision for revision in reversed(list(tender.revisions))
+                             if revision["author"] == "auction"]
+        if not auction_revisions:
+            LOGGER.exception(
+                "Can't find auction revisions, tendering bid amounts will be taken as they are",
+                extra=context_unpack(request, {"MESSAGE_ID": "fail_get_auction_revisions"})
+            )
+        for revision in auction_revisions:
+            try:
+                initial_doc = apply_json_patch(initial_doc, revision["changes"])
+            except (JsonPointerException, JsonPatchException) as e:
+                LOGGER.exception(e, extra=context_unpack(request, {"MESSAGE_ID": "fail_get_tendering_bids"}))
+
+    bid_model = type(tender).bids.model_class
+
+    initial_bids_list = []
+    for b in initial_doc["bids"]:
+        m = bid_model(b)
+        m.__parent__ = tender
+        initial_bids_list.append(m)
+
+    return initial_bids_list

@@ -33,7 +33,7 @@ from openprocurement.tender.core.models import (
     Award,
     Contract,
     Question,
-    BaseCancellation,
+    Cancellation as BaseCancellation,
     Feature,
     Lot as BaseLot,
     Complaint,
@@ -196,7 +196,7 @@ class Tender(BaseTender):
 
     procurementMethodType = StringType(default="belowThreshold")
 
-    procuring_entity_kinds = ["general", "special", "defense", "central", "other"]
+    procuring_entity_kinds = ["authority", "central", "defense", "general", "other", "social", "special"]
     block_complaint_status = ["answered", "pending"]
 
     def __local_roles__(self):
@@ -251,7 +251,9 @@ class Tender(BaseTender):
             and not any([i.status in self.block_complaint_status for a in self.awards for i in a.complaints])
         ):
             standStillEnds = [
-                a.complaintPeriod.endDate.astimezone(TZ) for a in self.awards if a.complaintPeriod.endDate
+                a.complaintPeriod.endDate.astimezone(TZ)
+                for a in self.awards
+                if a.complaintPeriod and a.complaintPeriod.endDate
             ]
             last_award_status = self.awards[-1].status if self.awards else ""
             if standStillEnds and last_award_status == "unsuccessful":
@@ -272,7 +274,9 @@ class Tender(BaseTender):
                     [i.status in self.block_complaint_status for a in lot_awards for i in a.complaints]
                 )
                 standStillEnds = [
-                    a.complaintPeriod.endDate.astimezone(TZ) for a in lot_awards if a.complaintPeriod.endDate
+                    a.complaintPeriod.endDate.astimezone(TZ)
+                    for a in lot_awards
+                    if a.complaintPeriod and a.complaintPeriod.endDate
                 ]
                 last_award_status = lot_awards[-1].status if lot_awards else ""
                 if (

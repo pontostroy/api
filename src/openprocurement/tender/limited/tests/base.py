@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from openprocurement.api.constants import SANDBOX_MODE
-from openprocurement.tender.core.utils import apply_data_patch
+from openprocurement.api.utils import get_now
 from openprocurement.tender.belowthreshold.tests.base import test_tender_data as base_data
 from openprocurement.tender.belowthreshold.tests.base import BaseTenderWebTest as BaseBaseTenderWebTest
 
@@ -33,7 +33,7 @@ test_tender_negotiation_data_2items["items"] = [
 
 test_tender_negotiation_quick_data = deepcopy(test_tender_data)
 test_tender_negotiation_quick_data["procurementMethodType"] = "negotiation.quick"
-test_tender_negotiation_quick_data["cause"] = "quick"
+test_tender_negotiation_quick_data["cause"] = "additionalConstruction"
 test_tender_negotiation_quick_data["causeDescription"] = "chupacabra"
 if SANDBOX_MODE:
     test_tender_negotiation_quick_data["procurementMethodDetails"] = "quick, accelerator=1440"
@@ -69,6 +69,15 @@ class BaseTenderWebTest(BaseBaseTenderWebTest):
         if extra:
             self.tender_document_patch.update(extra)
         self.save_changes()
+
+    def set_all_awards_complaint_period_end(self):
+        now = get_now()
+        startDate = (now - timedelta(days=2)).isoformat()
+        endDate = (now - timedelta(days=1)).isoformat()
+        tender_document = self.db.get(self.tender_id)
+        for award in tender_document["awards"]:
+            award.update({"complaintPeriod": {"startDate": startDate, "endDate": endDate}})
+        self.db.save(tender_document)
 
 
 class BaseTenderContentWebTest(BaseTenderWebTest):

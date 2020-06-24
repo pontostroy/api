@@ -100,8 +100,6 @@ class TenderAwardResourceTest(BaseESCOContentWebTest, TenderAwardResourceTestMix
         self.award_id = response.json["data"][0]["id"]
         self.bid_token = self.initial_bids_tokens[self.initial_bids[0]["id"]]
         self.app.authorization = ("Basic", ("broker", ""))
-        self.old_complaint_period_start_date = dateutil.parser.parse(
-            response.json["data"][0]["complaintPeriod"]["startDate"])
 
     test_patch_tender_award = snitch(patch_tender_award)
     test_check_tender_award_complaint_period_dates = snitch(check_tender_award_complaint_period_dates)
@@ -280,8 +278,12 @@ class TenderAwardComplaintDocumentResourceTest(BaseESCOContentWebTest, TenderAwa
             {"data": {"status": "active", "qualified": True, "eligible": True}},
         )
         # Create complaint for award
+        self.app.authorization = ("Basic", ("broker", ""))
         response = self.app.post_json(
-            "/tenders/{}/awards/{}/complaints".format(self.tender_id, self.award_id),
+            "/tenders/{}/awards/{}/complaints?acc_token={}".format(
+                self.tender_id, self.award_id,
+                self.initial_bids_tokens.values()[0]
+            ),
             {"data": test_draft_complaint},
         )
         complaint = response.json["data"]
@@ -320,7 +322,10 @@ class Tender2LotAwardComplaintDocumentResourceTest(BaseESCOContentWebTest):
         )
         # Create complaint for award
         response = self.app.post_json(
-            "/tenders/{}/awards/{}/complaints".format(self.tender_id, self.award_id),
+            "/tenders/{}/awards/{}/complaints?acc_token={}".format(
+                self.tender_id, self.award_id,
+                self.initial_bids_tokens.values()[0]
+            ),
             {"data": test_draft_complaint},
         )
         complaint = response.json["data"]

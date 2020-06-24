@@ -18,9 +18,12 @@ from openprocurement.tender.core.validation import (
     validate_award_complaint_operation_not_in_allowed_status,
     validate_update_complaint_not_in_allowed_complaint_status,
     validate_complaint_type_change,
+    validate_update_award_with_cancellation_lot_pending,
+    validate_add_complaint_with_tender_cancellation_in_pending,
+    validate_add_complaint_with_lot_cancellation_in_pending
 )
 from openprocurement.tender.belowthreshold.utils import check_tender_status
-from openprocurement.tender.core.utils import save_tender, apply_patch
+from openprocurement.tender.core.utils import save_tender, apply_patch, calculate_total_complaints
 
 
 def get_bid_id(request):
@@ -44,13 +47,26 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
 
     def validate_posting_complaint(self):
         tender = self.request.validated["tender"]
+
+        rules_2020_04_19 = get_first_revision_date(tender, get_now()) > RELEASE_2020_04_19
+
         context_award = self.request.validated["award"]
-        if not any(
-            award.status == "active"
-            for award in tender.awards
-            if award.lotID == context_award.lotID
-        ):
-            raise_operation_error(self.request, "Complaint submission is allowed only after award activation.")
+
+        if not rules_2020_04_19:
+
+            if not any(
+                award.status == "active"
+                for award in tender.awards
+                if award.lotID == context_award.lotID
+            ):
+                raise_operation_error(self.request, "Complaint submission is allowed only after award activation.")
+        else:
+
+            if context_award.status not in ("active", "unsuccessful"):
+                raise_operation_error(
+                    self.request,
+                    "Complaint submission is allowed only after award activation or unsuccessful award.",
+                )
 
     def validate_posting_claim(self):
         complaint = self.request.validated["complaint"]
@@ -61,15 +77,18 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
             raise_operation_error(self.request, "Claim submission is not allowed on pending award")
 
     def pre_create(self):
+        tender = self.request.validated["tender"]
+        rules_2020_04_19 = get_first_revision_date(tender) > RELEASE_2020_04_19
+
         complaint = self.request.validated["complaint"]
         complaint.date = get_now()
         complaint.relatedLot = self.context.lotID
         complaint.bid_id = get_bid_id(self.request)
 
-        if complaint.status == "claim":   # claim
+        if complaint.status == "claim" and complaint.type == "claim":   # claim
             self.validate_posting_claim()
             complaint.dateSubmitted = get_now()
-        elif complaint.status == "pending":  # complaint
+        elif not rules_2020_04_19 and complaint.status == "pending":  # complaint
             self.validate_posting_complaint()
             complaint.type = "complaint"
             complaint.dateSubmitted = get_now()
@@ -86,6 +105,8 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
             validate_award_complaint_operation_not_in_allowed_status,
             validate_award_complaint_add_only_for_active_lots,
             validate_add_complaint_not_in_complaint_period,
+            validate_add_complaint_with_tender_cancellation_in_pending,
+            validate_add_complaint_with_lot_cancellation_in_pending("award"),
         ),
     )
     def collection_post(self):
@@ -95,7 +116,11 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
         
         complaint = self.pre_create()
         
-        complaint.complaintID = "{}.{}{}".format(tender.tenderID, self.server_id, self.complaints_len(tender) + 1)
+        complaint.complaintID = "{}.{}{}".format(
+            tender.tenderID,
+            self.server_id,
+            calculate_total_complaints(tender) + 1,
+        )
         access = set_ownership(complaint, self.request)
         self.context.complaints.append(complaint)
         if save_tender(self.request):
@@ -119,6 +144,7 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
         permission="edit_complaint",
         validators=(
             validate_patch_complaint_data,
+            validate_update_award_with_cancellation_lot_pending,
             validate_award_complaint_operation_not_in_allowed_status,
             validate_award_complaint_update_only_for_active_lots,
             validate_update_complaint_not_in_allowed_complaint_status,
@@ -152,9 +178,21 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
     def patch_as_complaint_owner(self, data):
         status = self.context.status
         new_status = data.get("status", status)
+        tender = self.request.validated["tender"]
+        rules_2020_04_19 = get_first_revision_date(tender, get_now()) > RELEASE_2020_04_19
         if (
-            status in ["draft", "claim", "answered"] and new_status == "cancelled"
-            or status in ["pending", "accepted"] and new_status == "stopping"
+            new_status == "cancelled"
+            and status in ["draft", "claim", "answered"]
+            and self.context.type == "claim"
+        ) or (
+            new_status == "cancelled"
+            and status == "draft"
+            and self.context.type == "complaint"
+            and not rules_2020_04_19
+        ) or (
+            new_status == "stopping"
+            and status in ["pending", "accepted"]
+            and not rules_2020_04_19
         ):
             apply_patch(self.request, save=False, src=self.context.serialize())
             self.context.dateCanceled = get_now()
@@ -172,12 +210,13 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
 
     def patch_draft_as_complaint_owner(self, data):
         tender = self.request.validated["tender"]
-        
+        rules_2020_04_19 = get_first_revision_date(tender) > RELEASE_2020_04_19
+
         complaint_period = self.request.validated["award"].complaintPeriod
         is_complaint_period = (
-            complaint_period.startDate < get_now() < complaint_period.endDate
+            complaint_period.startDate <= get_now() <= complaint_period.endDate
             if complaint_period.endDate
-            else complaint_period.startDate < get_now()
+            else complaint_period.startDate <= get_now()
         )
         if not is_complaint_period:
             raise_operation_error(self.request, "Can't update draft complaint not in complaintPeriod")
@@ -186,18 +225,18 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
         if new_status == self.context.status:
             apply_patch(self.request, save=False, src=self.context.serialize())
         elif (
-            get_first_revision_date(tender, get_now()) > RELEASE_2020_04_19
+            rules_2020_04_19
+            and self.context.type == "complaint"
             and new_status == "mistaken"
         ):
+            self.context.rejectReason = "cancelledByComplainant"
             apply_patch(self.request, save=False, src=self.context.serialize())
-        elif new_status == "claim":
+        elif self.context.type == "claim" and new_status == "claim":
             self.validate_posting_claim()
             apply_patch(self.request, save=False, src=self.context.serialize())
             self.context.dateSubmitted = get_now()
 
-        elif new_status == "pending":
-            self.validate_posting_complaint()
-            validate_complaint_type_change(self.request)
+        elif new_status == "pending" and not rules_2020_04_19:
             apply_patch(self.request, save=False, src=self.context.serialize())
             self.context.type = "complaint"
             self.context.dateSubmitted = get_now()
@@ -236,15 +275,18 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
         new_status = data.get("status", status)
 
         tender = self.request.validated["tender"]
-        old_rules = get_first_revision_date(tender, get_now()) < RELEASE_2020_04_19
+
+        rules_2020_04_19 = get_first_revision_date(tender, get_now()) > RELEASE_2020_04_19
 
         if new_status == status and status in ["pending", "accepted", "stopping"]:
             apply_patch(self.request, save=False, src=context.serialize())
 
         elif (
             status in ["pending", "stopping"]
-            and ((old_rules and new_status in ["invalid", "mistaken"])
-            or (new_status == "invalid"))
+            and (
+                (not rules_2020_04_19 and new_status in ["invalid", "mistaken"])
+                or (new_status == "invalid")
+            )
         ):
             apply_patch(self.request, save=False, src=context.serialize())
             context.dateDecision = get_now()
@@ -261,7 +303,11 @@ class BaseTenderAwardComplaintResource(BaseTenderComplaintResource):
             if new_status == "satisfied":
                 self.on_satisfy_complaint_by_reviewer()
 
-        elif status in ["pending", "accepted", "stopping"] and new_status == "stopped":
+        elif (
+            (not rules_2020_04_19 and status in ["pending", "accepted", "stopping"])
+            or (rules_2020_04_19 and status == "accepted")
+            and new_status == "stopped"
+        ):
             apply_patch(self.request, save=False, src=context.serialize())
             context.dateDecision = get_now()
             context.dateCanceled = context.dateCanceled or get_now()

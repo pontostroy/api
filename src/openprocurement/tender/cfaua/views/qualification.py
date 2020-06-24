@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 from openprocurement.api.utils import json_view, context_unpack, APIResource, raise_operation_error
 from openprocurement.tender.core.utils import save_tender, apply_patch
+from openprocurement.tender.core.validation import (
+    validate_operation_with_lot_cancellation_in_pending,
+    validate_update_status_before_milestone_due_date,
+)
 from openprocurement.tender.cfaua.validation import (
     validate_patch_qualification_data,
     validate_cancelled_qualification_update,
@@ -34,7 +38,9 @@ class TenderQualificationResource(APIResource):
         validators=(
             validate_patch_qualification_data,
             validate_qualification_update_not_in_pre_qualification,
+            validate_operation_with_lot_cancellation_in_pending("qualification"),
             validate_cancelled_qualification_update,
+            validate_update_status_before_milestone_due_date,
         ),
         permission="edit_tender",
     )

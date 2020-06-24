@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import unittest
-import mock
+from mock import patch
 from datetime import timedelta
 
 from openprocurement.api.utils import get_now
 from openprocurement.api.tests.base import snitch
-from openprocurement.tender.belowthreshold.tests.base import test_cancellation
+from openprocurement.tender.belowthreshold.tests.base import (
+    test_cancellation,
+    test_organization,
+)
 
 from openprocurement.tender.belowthreshold.tests.cancellation import (
     TenderCancellationDocumentResourceTestMixin,
@@ -22,6 +25,7 @@ from openprocurement.tender.belowthreshold.tests.cancellation_blanks import (
 from openprocurement.tender.openua.tests.cancellation import (
     TenderCancellationResourceNewReleaseTestMixin,
     TenderCancellationComplaintResourceTestMixin,
+    TenderAwardsCancellationResourceTestMixin,
 )
 
 from openprocurement.tender.openua.tests.cancellation_blanks import (
@@ -63,6 +67,7 @@ class TenderCancellationResourceTestMixin(object):
     test_get_tender_cancellation = snitch(get_tender_cancellation)
     test_get_tender_cancellations = snitch(get_tender_cancellations)
     test_create_cancellation_on_lot = snitch(create_cancellation_on_lot)
+    test_create_cancellation_with_tender_complaint = None
 
 
 class TenderCancellationResourceTest(
@@ -76,13 +81,29 @@ class TenderCancellationResourceTest(
     test_permission_cancellation_pending = snitch(permission_cancellation_pending)
 
 
-@mock.patch("openprocurement.tender.limited.validation.RELEASE_2020_04_19",
-            get_now() - timedelta(days=1))
+@patch("openprocurement.tender.limited.validation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
 class TenderNegotiationCancellationResourceTest(
     TenderCancellationResourceTestMixin,
     TenderCancellationResourceNewReleaseTestMixin,
     BaseTenderContentWebTest,
 ):
+    def setUp(self):
+        super(TenderNegotiationCancellationResourceTest, self).setUp()
+        response = self.app.post_json(
+            "/tenders/{}/awards?acc_token={}".format(self.tender_id, self.tender_token),
+            {"data": {"suppliers": [test_organization], "qualified": True, "status": "active"}}
+        )
+        self.assertEqual(response.status, "201 Created")
+        self.assertEqual(response.content_type, "application/json")
+        award = response.json["data"]
+        self.award_id = award["id"]
+
+        self.app.patch_json(
+            "/tenders/{}/awards/{}?acc_token={}".format(self.tender_id, self.award_id, self.tender_token),
+            {"data": {"status": "active"}}
+        )
+        self.set_all_awards_complaint_period_end()
+
     initial_data = test_tender_negotiation_data
     valid_reasonType_choices = ["noObjectiveness", "unFixable", "noDemand", "expensesCut", "dateViolation"]
 
@@ -94,15 +115,36 @@ class TenderNegotiationQuickCancellationResourceTest(
     TenderNegotiationCancellationResourceTest,
     TenderCancellationResourceNewReleaseTestMixin
 ):
+    def setUp(self):
+        super(TenderNegotiationCancellationResourceTest, self).setUp()
+        response = self.app.post_json(
+            "/tenders/{}/awards?acc_token={}".format(self.tender_id, self.tender_token),
+            {"data": {"suppliers": [test_organization], "qualified": True, "status": "active"}}
+        )
+        self.assertEqual(response.status, "201 Created")
+        self.assertEqual(response.content_type, "application/json")
+        award = response.json["data"]
+        self.award_id = award["id"]
+
+        self.app.patch_json(
+            "/tenders/{}/awards/{}?acc_token={}".format(self.tender_id, self.award_id, self.tender_token),
+            {"data": {"status": "active"}}
+        )
+        self.set_all_awards_complaint_period_end()
+
     initial_data = test_tender_negotiation_quick_data
     valid_reasonType_choices = ["noObjectiveness", "unFixable", "noDemand", "expensesCut", "dateViolation"]
 
 
-class TenderCancellationDocumentResourceTest(BaseTenderContentWebTest, TenderCancellationDocumentResourceTestMixin):
+class TenderCancellationDocumentResourceTest(
+    BaseTenderContentWebTest,
+    TenderCancellationDocumentResourceTestMixin
+):
     initial_data = test_tender_data
 
     def setUp(self):
         super(TenderCancellationDocumentResourceTest, self).setUp()
+
         # Create cancellation
         response = self.app.post_json(
             "/tenders/{}/cancellations?acc_token={}".format(self.tender_id, self.tender_token),
@@ -121,14 +163,25 @@ class TenderNegotiationQuickCancellationComplaintResourceTest(
 ):
     initial_data = test_tender_negotiation_quick_data
 
-    @mock.patch("openprocurement.tender.core.models.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.validation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.models.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.validation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
     def setUp(self):
         super(TenderNegotiationQuickCancellationComplaintResourceTest, self).setUp()
+        response = self.app.post_json(
+            "/tenders/{}/awards?acc_token={}".format(self.tender_id, self.tender_token),
+            {"data": {"suppliers": [test_organization], "qualified": True, "status": "active"}}
+        )
+        self.assertEqual(response.status, "201 Created")
+        self.assertEqual(response.content_type, "application/json")
+        award = response.json["data"]
+        self.award_id = award["id"]
+
+        self.app.patch_json(
+            "/tenders/{}/awards/{}?acc_token={}".format(self.tender_id, self.award_id, self.tender_token),
+            {"data": {"status": "active"}}
+        )
+        self.set_all_awards_complaint_period_end()
 
         # Create cancellation
         cancellation = dict(**test_cancellation)
@@ -148,16 +201,27 @@ class TenderNegotiationCancellationComplaintResourceTest(
 ):
     initial_data = test_tender_negotiation_data
 
-    @mock.patch("openprocurement.tender.core.models.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
-    @mock.patch("openprocurement.tender.core.validation.RELEASE_2020_04_19",
-                get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.models.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
+    @patch("openprocurement.tender.core.validation.RELEASE_2020_04_19", get_now() - timedelta(days=1))
     def setUp(self):
         super(TenderNegotiationCancellationComplaintResourceTest, self).setUp()
+        response = self.app.post_json(
+            "/tenders/{}/awards?acc_token={}".format(self.tender_id, self.tender_token),
+            {"data": {"suppliers": [test_organization], "qualified": True, "status": "active"}}
+        )
+        self.assertEqual(response.status, "201 Created")
+        self.assertEqual(response.content_type, "application/json")
+        award = response.json["data"]
+        self.award_id = award["id"]
 
-        # Create cancellation
+        self.app.patch_json(
+            "/tenders/{}/awards/{}?acc_token={}".format(self.tender_id, self.award_id, self.tender_token),
+            {"data": {"status": "active"}}
+        )
+        self.set_all_awards_complaint_period_end()
+
+        # create cancellation
         cancellation = dict(**test_cancellation)
         cancellation.update({
             "reasonType": "noDemand"

@@ -1,6 +1,7 @@
 from copy import deepcopy
+from mock import patch
 
-from openprocurement.tender.belowthreshold.tests.base import test_draft_complaint
+from openprocurement.tender.belowthreshold.tests.base import test_draft_complaint, test_cancellation
 from openprocurement.tender.competitivedialogue.tests.base import (
     BaseCompetitiveDialogUAContentWebTest,
     BaseCompetitiveDialogEUContentWebTest,
@@ -9,16 +10,22 @@ from openprocurement.tender.competitivedialogue.tests.base import (
 )
 from openprocurement.tender.openua.tests.post import (
     ComplaintPostResourceMixin,
+    ClaimPostResourceMixin,
     TenderComplaintPostResourceMixin,
     TenderQualificationComplaintPostResourceMixin,
+    TenderCancellationComplaintPostResourceMixin,
+    date_after_2020_04_19,
 )
 
 
 class TenderCompetitiveDialogUAComplaintPostResourceTest(
     BaseCompetitiveDialogUAContentWebTest,
     ComplaintPostResourceMixin,
+    ClaimPostResourceMixin,
     TenderComplaintPostResourceMixin
 ):
+    docservice = True
+
     def setUp(self):
         super(TenderCompetitiveDialogUAComplaintPostResourceTest, self).setUp()
         response = self.app.post_json(
@@ -37,8 +44,11 @@ class TenderCompetitiveDialogUAComplaintPostResourceTest(
 class TenderCompetitiveDialogEUComplaintPostResourceTest(
     BaseCompetitiveDialogEUContentWebTest,
     ComplaintPostResourceMixin,
+    ClaimPostResourceMixin,
     TenderComplaintPostResourceMixin
 ):
+    docservice = True
+
     def setUp(self):
         super(TenderCompetitiveDialogEUComplaintPostResourceTest, self).setUp()
         response = self.app.post_json(
@@ -56,8 +66,10 @@ class TenderCompetitiveDialogEUComplaintPostResourceTest(
 class TenderCompetitiveDialogUAQualificationComplaintPostResourceTest(
     BaseCompetitiveDialogUAContentWebTest,
     ComplaintPostResourceMixin,
+    ClaimPostResourceMixin,
     TenderQualificationComplaintPostResourceMixin
 ):
+    docservice = True
     initial_status = "active.tendering"  # 'active.pre-qualification.stand-still' status sets in setUp
     initial_bids = test_bids
     initial_auth = ("Basic", ("broker", ""))
@@ -157,8 +169,10 @@ class TenderCompetitiveDialogUAQualificationComplaintPostResourceTest(
 class TenderCompetitiveDialogEUQualificationComplaintPostResourceTest(
     BaseCompetitiveDialogEUContentWebTest,
     ComplaintPostResourceMixin,
+    ClaimPostResourceMixin,
     TenderQualificationComplaintPostResourceMixin
 ):
+    docservice = True
     initial_status = "active.tendering"  # 'active.pre-qualification.stand-still' status sets in setUp
     initial_bids = test_bids
     initial_auth = ("Basic", ("broker", ""))
@@ -250,5 +264,63 @@ class TenderCompetitiveDialogEUQualificationComplaintPostResourceTest(
         self.complaint_id = complaint["id"]
         self.complaint_owner_token = response.json["access"]["token"]
 
+        self.assertEqual(response.status, "201 Created")
+        self.assertEqual(response.content_type, "application/json")
+
+
+@patch("openprocurement.tender.core.models.RELEASE_2020_04_19", date_after_2020_04_19)
+@patch("openprocurement.tender.core.validation.RELEASE_2020_04_19", date_after_2020_04_19)
+@patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19", date_after_2020_04_19)
+class TenderCancellationComplaintPostResourceTest(
+    BaseCompetitiveDialogUAContentWebTest,
+    ComplaintPostResourceMixin,
+    TenderCancellationComplaintPostResourceMixin
+):
+    docservice = True
+
+    @patch("openprocurement.tender.core.models.RELEASE_2020_04_19", date_after_2020_04_19)
+    @patch("openprocurement.tender.core.validation.RELEASE_2020_04_19", date_after_2020_04_19)
+    @patch("openprocurement.tender.core.views.cancellation.RELEASE_2020_04_19", date_after_2020_04_19)
+    def setUp(self):
+        super(TenderCancellationComplaintPostResourceTest, self).setUp()
+        self.set_complaint_period_end()
+
+        # Create cancellation
+        cancellation = dict(**test_cancellation)
+        cancellation.update({
+            "reasonType": "noDemand"
+        })
+        response = self.app.post_json(
+            "/tenders/{}/cancellations?acc_token={}".format(self.tender_id, self.tender_token),
+            {"data": cancellation},
+        )
+        cancellation = response.json["data"]
+        self.cancellation_id = cancellation["id"]
+
+        # Add document and update cancellation status to pending
+
+        self.app.post(
+            "/tenders/{}/cancellations/{}/documents?acc_token={}".format(
+                self.tender_id, self.cancellation_id, self.tender_token
+            ),
+            upload_files=[("file", "name.doc", "content")],
+        )
+        self.app.patch_json(
+            "/tenders/{}/cancellations/{}?acc_token={}".format(
+                self.tender_id, self.cancellation_id, self.tender_token
+            ),
+            {"data": {"status": "pending"}},
+        )
+
+        # Create complaint for cancellation
+
+        response = self.app.post_json(
+            "/tenders/{}/cancellations/{}/complaints".format(
+                self.tender_id, self.cancellation_id
+            ),
+            {"data": test_draft_complaint},
+        )
+        self.complaint_id = response.json["data"]["id"]
+        self.complaint_owner_token = response.json["access"]["token"]
         self.assertEqual(response.status, "201 Created")
         self.assertEqual(response.content_type, "application/json")

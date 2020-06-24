@@ -13,6 +13,8 @@ from openprocurement.tender.core.validation import (
     validate_update_award_only_for_active_lots,
     validate_update_award_in_not_allowed_status,
     validate_update_award_with_accepted_complaint,
+    validate_operation_with_lot_cancellation_in_pending,
+    validate_update_status_before_milestone_due_date,
 )
 from openprocurement.tender.belowthreshold.views.award import TenderAwardResource
 from openprocurement.api.utils import json_view, context_unpack
@@ -36,7 +38,9 @@ class TenderUaAwardResource(TenderAwardResource):
             validate_patch_award_data,
             validate_update_award_in_not_allowed_status,
             validate_update_award_only_for_active_lots,
+            validate_operation_with_lot_cancellation_in_pending("award"),
             validate_update_award_with_accepted_complaint,
+            validate_update_status_before_milestone_due_date,
         ),
     )
     def patch(self):
@@ -103,14 +107,10 @@ class TenderUaAwardResource(TenderAwardResource):
 
         now = get_now()
 
-        if award_status != award.status and award.status in ["active", "unsuccessful"]:
-            if award.complaintPeriod:
-                award.complaintPeriod.startDate = now
-            else:
-                award.complaintPeriod = {"startDate": now.isoformat()}
-
         if award_status == "pending" and award.status == "active":
-            award.complaintPeriod.endDate = calculate_complaint_business_date(now, STAND_STILL_TIME, tender, True)
+            award.complaintPeriod = {"startDate": now.isoformat(),
+                                     "endDate": calculate_complaint_business_date(now, STAND_STILL_TIME, tender, True)
+                                     }
             add_contract(self.request, award, now)
             add_next_award(self.request)
         elif (
@@ -138,7 +138,9 @@ class TenderUaAwardResource(TenderAwardResource):
                     i.status = "cancelled"
             add_next_award(self.request)
         elif award_status == "pending" and award.status == "unsuccessful":
-            award.complaintPeriod.endDate = calculate_complaint_business_date(now, STAND_STILL_TIME, tender, True)
+            award.complaintPeriod = {"startDate": now.isoformat(),
+                                     "endDate": calculate_complaint_business_date(now, STAND_STILL_TIME, tender, True)
+                                     }
             add_next_award(self.request)
         elif (
             award_status == "unsuccessful"

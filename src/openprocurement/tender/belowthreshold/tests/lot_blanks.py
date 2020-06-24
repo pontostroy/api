@@ -3,6 +3,10 @@ from copy import deepcopy
 from datetime import timedelta
 from email.header import Header
 
+from openprocurement.api.constants import RELEASE_2020_04_19
+from openprocurement.tender.core.tests.cancellation import (
+    activate_cancellation_after_2020_04_19,
+)
 from openprocurement.api.utils import get_now
 from openprocurement.tender.belowthreshold.tests.base import test_organization, test_cancellation
 
@@ -1507,8 +1511,9 @@ def proc_1lot_1bid(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(seconds=1)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -1627,8 +1632,9 @@ def proc_1lot_2bid(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(seconds=1)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -1696,8 +1702,10 @@ def proc_2lot_0bid(self):
 def proc_2lot_2can(self):
     self.app.authorization = ("Basic", ("broker", ""))
     # create tender
+
     response = self.app.post_json("/tenders", {"data": self.initial_data})
     tender_id = self.tender_id = response.json["data"]["id"]
+
     owner_token = response.json["access"]["token"]
     lots = []
     for lot in 2 * self.test_lots_data:
@@ -1733,6 +1741,12 @@ def proc_2lot_2can(self):
         },
     )
     self.assertTrue(all(["auctionPeriod" in i for i in response.json["data"]["lots"]]))
+
+    set_complaint_period_end = getattr(self, "set_complaint_period_end", None)
+
+    if RELEASE_2020_04_19 < get_now() and set_complaint_period_end:
+        set_complaint_period_end()
+
     # cancel every lot
     for lot_id in lots:
         cancellation = dict(**test_cancellation)
@@ -1745,6 +1759,10 @@ def proc_2lot_2can(self):
             "/tenders/{}/cancellations?acc_token={}".format(tender_id, owner_token),
             {"data": cancellation},
         )
+        cancellation_id = response.json["data"]["id"]
+        if RELEASE_2020_04_19 < get_now():
+            activate_cancellation_after_2020_04_19(self, cancellation_id, tender_id, owner_token)
+
     response = self.app.get("/tenders/{}".format(tender_id))
     self.assertTrue(all([i["status"] == "cancelled" for i in response.json["data"]["lots"]]))
     self.assertEqual(response.json["data"]["status"], "cancelled")
@@ -1820,6 +1838,11 @@ def proc_2lot_2bid_0com_1can_before_auction(self):
         "/tenders/{}/cancellations?acc_token={}".format(tender_id, owner_token),
         {"data": cancellation},
     )
+
+    cancellation_id = response.json["data"]["id"]
+    if RELEASE_2020_04_19 < get_now():
+        activate_cancellation_after_2020_04_19(self, cancellation_id, tender_id, owner_token)
+
     # switch to active.qualification
     response = self.set_status("active.auction", {"status": "active.tendering"})
     self.app.authorization = ("Basic", ("chronograph", ""))
@@ -1841,8 +1864,9 @@ def proc_2lot_2bid_0com_1can_before_auction(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = get_now().isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # check tender status
     self.app.authorization = ("Basic", ("chronograph", ""))
@@ -1924,6 +1948,9 @@ def proc_2lot_1bid_0com_1can(self):
         "/tenders/{}/cancellations?acc_token={}".format(tender_id, owner_token),
         {"data": cancellation},
     )
+    cancellation_id = response.json["data"]["id"]
+    if RELEASE_2020_04_19 < get_now():
+        activate_cancellation_after_2020_04_19(self, cancellation_id, tender_id, owner_token)
     # for second lot
     lot_id = lots[1]
     # get awards
@@ -1940,8 +1967,9 @@ def proc_2lot_1bid_0com_1can(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = get_now().isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # check tender status
     self.app.authorization = ("Basic", ("chronograph", ""))
@@ -2027,8 +2055,9 @@ def proc_2lot_1bid_2com_1win(self):
         self.set_status("complete", {"status": "active.awarded"})
         # time travel
         tender = self.db.get(tender_id)
+        now = (get_now() - timedelta(minutes=2)).isoformat()
         for i in tender.get("awards", []):
-            i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+            i["complaintPeriod"] = {"startDate": now, "endDate": now}
         self.db.save(tender)
         # sign contract
         self.app.authorization = ("Basic", ("broker", ""))
@@ -2115,8 +2144,9 @@ def proc_2lot_1bid_0com_0win(self):
         self.set_status("complete", {"status": "active.awarded"})
         # time travel
         tender = self.db.get(tender_id)
+        now = get_now().isoformat()
         for i in tender.get("awards", []):
-            i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+            i["complaintPeriod"] = {"startDate": now, "endDate": now}
         self.db.save(tender)
     # check tender status
     self.set_status("complete", {"status": "active.awarded"})
@@ -2203,8 +2233,9 @@ def proc_2lot_1bid_1com_1win(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(seconds=1)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -2229,7 +2260,7 @@ def proc_2lot_1bid_1com_1win(self):
     # time travel
     tender = self.db.get(tender_id)
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # check tender status
     self.app.authorization = ("Basic", ("chronograph", ""))
@@ -2358,8 +2389,9 @@ def proc_2lot_2bid_2com_2win(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(minutes=2)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -2395,8 +2427,9 @@ def proc_2lot_2bid_2com_2win(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(minutes=1)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -2508,8 +2541,9 @@ def proc_2lot_1feature_2bid_2com_2win(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(minutes=2)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))
@@ -2535,8 +2569,9 @@ def proc_2lot_1feature_2bid_2com_2win(self):
     self.set_status("complete", {"status": "active.awarded"})
     # time travel
     tender = self.db.get(tender_id)
+    now = (get_now() - timedelta(minutes=1)).isoformat()
     for i in tender.get("awards", []):
-        i["complaintPeriod"]["endDate"] = i["complaintPeriod"]["startDate"]
+        i["complaintPeriod"] = {"startDate": now, "endDate": now}
     self.db.save(tender)
     # sign contract
     self.app.authorization = ("Basic", ("broker", ""))

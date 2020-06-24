@@ -43,6 +43,8 @@ from openprocurement.tender.limited.tests.award_blanks import (
     create_tender_award_complaint_invalid,
     create_tender_negotiation_award_complaints,
     patch_tender_award_complaint,
+    bot_patch_tender_award_complaint,
+    bot_patch_tender_award_complaint_forbidden,
     review_tender_award_complaint,
     review_tender_award_stopping_complaint,
     get_tender_award_complaint,
@@ -75,7 +77,6 @@ from openprocurement.tender.limited.tests.award_blanks import (
     activate_contract_with_cancelled_award,
     check_tender_award_complaint_period_dates,
 )
-
 
 class TenderAwardResourceTest(BaseTenderContentWebTest):
     initial_status = "active"
@@ -169,10 +170,11 @@ class TenderNegotiationAwardComplaintResourceTest(BaseTenderContentWebTest):
     test_get_tender_award_complaint = snitch(get_tender_award_complaint)
     test_get_tender_award_complaints = snitch(get_tender_award_complaints)
     test_cancelled_award_with_complaint = snitch(cancelled_award_with_complaint)
+    test_bot_patch_tender_award_complaint = snitch(bot_patch_tender_award_complaint)
+    test_bot_patch_tender_award_complaint_forbidden = snitch(bot_patch_tender_award_complaint_forbidden)
 
 
 class TenderLotNegotiationAwardComplaintResourceTest(TenderNegotiationAwardComplaintResourceTest):
-    test_create_tender_award_complaints = snitch(create_tender_lot_award_complaints)
 
     def create_award(self):
         # create lot
@@ -210,6 +212,7 @@ class TenderLotNegotiationAwardComplaintResourceTest(TenderNegotiationAwardCompl
         award = response.json["data"]
         self.award_id = award["id"]
 
+    test_create_tender_award_complaints = snitch(create_tender_lot_award_complaints)
     test_cancelled_award_with_complaint = snitch(cancelled_lot_award_with_complaint)
 
 
@@ -394,6 +397,14 @@ class TenderNegotiationAwardComplaintDocumentResourceTest(
         self.assertEqual(response.content_type, "application/json")
         award = response.json["data"]
         self.award_id = award["id"]
+
+        response = self.app.patch_json(
+            "/tenders/{}/awards/{}?acc_token={}".format(self.tender_id, self.award_id, self.tender_token),
+            {"data": {"status": "active"}},
+        )
+        self.assertEqual(response.status, "200 OK")
+        self.assertEqual(response.json["data"]["status"], "active")
+
         # Create complaint for award
         response = self.app.post_json(
             "/tenders/{}/awards/{}/complaints".format(self.tender_id, self.award_id),
