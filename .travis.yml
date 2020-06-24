@@ -163,7 +163,7 @@ jobs:
          - COV_FILE: .coveragerc
 script:
   - mkdir -p /dev/shm/couch
-  - docker run -d -v /dev/shm/couch:/usr/local/var/lib/couchdb -e COUCHDB_USER=$COUCHDB_USER -e COUCHDB_PASSWORD=$COUCHDB_PASSWORD --net=host couchdb:1.7
+  - docker run -d -v /dev/shm/couch:/usr/local/var/lib/couchdb -e CMD1=${CMD1} -e CMD2=${CMD2} -e COUCHDB_USER=$COUCHDB_USER -e COUCHDB_PASSWORD=$COUCHDB_PASSWORD --net=host couchdb:1.7
   - docker login -u $USERN -p $PASS docker.pkg.github.com
   - | 
       docker run -it --add-host=couchdb:127.0.0.1 -e TZ=$TZ -e TESTS_PATH=$TESTS_PATH -e COV_PATH=$COV_PATH -e COV_FILE=$COV_FILE \
