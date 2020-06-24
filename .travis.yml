@@ -225,9 +225,9 @@ jobs:
          - COV_FILE: .coveragerc
          - CMD1: popen//id=sand//env:DB_NAME=test_sandbox//env:SANDBOX_MODE=1//env:SINGLE_APP=1
          - CMD2: popen//id=prod//env:DB_NAME=test_prod//env:SANDBOX_MODE=//env:SINGLE_APP=1
-   - stage: test
-     name: test_historical_core_before_2020_04_19
-     env:
+    - stage: test
+      name: test_historical_core_before_2020_04_19
+      env:
          - TESTS_PATH: src/openprocurement/historical/core/tests
          - COV_PATH: src/openprocurement/historical/core
          - COV_FILE: .coveragerc
