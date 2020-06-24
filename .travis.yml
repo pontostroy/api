@@ -146,7 +146,7 @@ jobs:
          - COV_PATH: src/openprocurement/tender/openuadefense
          - COV_FILE: .coveragerc
          - CMD1: popen//id=sand//env:DB_NAME=test_sandbox//env:SANDBOX_MODE=1//env:SINGLE_APP=1
-         - CND2: popen//id=prod//env:DB_NAME=test_prod//env:SANDBOX_MODE=//env:SINGLE_APP=1 
+         - CMD2: popen//id=prod//env:DB_NAME=test_prod//env:SANDBOX_MODE=//env:SINGLE_APP=1 
     - stage: test
       name: test_tender_openuadefense_before_2020_04_19
       env: 
@@ -154,7 +154,7 @@ jobs:
          - COV_PATH: src/openprocurement/tender/openuadefense
          - COV_FILE: .coveragerc
          - CMD1: popen//id=sand_relsease_2020_04_19//env:DB_NAME=test_sandbox_2020_04_19//env:SANDBOX_MODE=1//env:SINGLE_APP=1//env:DEFAULT_RELEASE_2020_04_19=2030-01-01
-         - CND2: popen//id=prod_relsease_2020_04_19//env:DB_NAME=test_prod_2020_04_19//env:SANDBOX_MODE=//env:SINGLE_APP=1//env:DEFAULT_RELEASE_2020_04_19=2030-01-01
+         - CMD2: popen//id=prod_relsease_2020_04_19//env:DB_NAME=test_prod_2020_04_19//env:SANDBOX_MODE=//env:SINGLE_APP=1//env:DEFAULT_RELEASE_2020_04_19=2030-01-01
     - stage: test
       name: test_tender_cfaselectionua
       env: 
